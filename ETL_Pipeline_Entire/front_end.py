@@ -21,10 +21,14 @@ if 'extraction_complete' not in st.session_state:
     st.session_state.extraction_complete = False
 if 'mapping_complete' not in st.session_state:
     st.session_state.mapping_complete = False
+if 'transformation_complete' not in st.session_state:
+    st.session_state.transformation_complete = False
 if 'connection_established' not in st.session_state:
     st.session_state.connection_established = False
 if 'tables' not in st.session_state:
     st.session_state.tables = []
+if 'show_only_query' not in st.session_state:
+    st.session_state.show_only_query = False
 
 # Check if files exist to determine completion status
 if os.path.exists('extraction.json'):
@@ -33,6 +37,9 @@ if os.path.exists('mapping_status.json'):
     with open('mapping_status.json', 'r') as f:
         mapping_status = json.load(f)
         st.session_state.mapping_complete = True
+if os.path.exists('transformation_status.json'):
+    st.session_state.transformation_complete = True
+    st.session_state.show_only_query = True
 
 # -----------------------------
 # Data Extraction Functions
@@ -159,6 +166,56 @@ def move_data_to_silver_db():
             print(f"Error moving table {table}: {e}")
     cursor.close()
     conn.close()
+
+# -----------------------------
+# Silver DB Functions
+# -----------------------------
+def connect_to_silver_db():
+    try:
+        conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="root",
+            database="silver_db"
+        )
+        return conn
+    except mysql.connector.Error as err:
+        st.error(f"Error connecting to silver_db: {err}")
+        return None
+
+def list_tables_in_silver_db():
+    conn = connect_to_silver_db()
+    if conn:
+        cursor = conn.cursor()
+        cursor.execute("SHOW TABLES;")
+        tables = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        return tables
+    return []
+
+def get_table_schema(table_name):
+    conn = connect_to_silver_db()
+    if conn:
+        cursor = conn.cursor()
+        cursor.execute(f"DESCRIBE {table_name};")
+        schema = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return schema
+    return []
+
+def execute_query(query):
+    conn = connect_to_silver_db()
+    if conn:
+        try:
+            df = pd.read_sql(query, conn)
+            conn.close()
+            return df
+        except Exception as e:
+            conn.close()
+            return pd.DataFrame({"Error": [str(e)]})
+    return pd.DataFrame({"Error": ["Could not connect to silver_db"]})
 
 # -----------------------------
 # Page Functions
@@ -425,6 +482,12 @@ def data_transformations_page():
         if st.button("Load All Transformed Tables", key="load_transformed_all"):
             load_all_tables(st.session_state["df_transformed"], prefix="transformed")
             st.success("All transformed tables loaded into silver_db.")
+            # Mark transformation as complete
+            with open("transformation_status.json", "w") as f:
+                json.dump({"transformation_complete": True}, f)
+            st.session_state.transformation_complete = True
+            st.session_state.show_only_query = True
+            st.rerun()  # Refresh the page to show only query page
 
     # --- Step 5: Load All Aggregated Data to Silver Layer ---
     if st.session_state["agg_results"]:
@@ -432,6 +495,101 @@ def data_transformations_page():
         if st.button("Load All Aggregated Tables", key="load_agg_all"):
             load_all_tables(st.session_state["agg_results"], prefix="agg")
             st.success("All aggregated tables loaded into silver_db.")
+            # Mark transformation as complete if not already done
+            if not st.session_state.transformation_complete:
+                with open("transformation_status.json", "w") as f:
+                    json.dump({"transformation_complete": True}, f)
+                st.session_state.transformation_complete = True
+                st.session_state.show_only_query = True
+                st.rerun()  # Refresh the page to show only query page
+
+def query_data_ai_page():
+    st.title("Query Data using AI")
+    
+    st.header("Silver DB Tables Information")
+    
+    # Get all tables from silver_db
+    silver_tables = list_tables_in_silver_db()
+    
+    if not silver_tables:
+        st.warning("No tables found in silver_db. Please ensure data was loaded properly.")
+        return
+    
+    # Display table information
+    table_info = {}
+    for table in silver_tables:
+        with st.expander(f"Table: {table}"):
+            # Get schema
+            schema = get_table_schema(table)
+            schema_df = pd.DataFrame(schema, columns=["Field", "Type", "Null", "Key", "Default", "Extra"])
+            st.subheader("Schema")
+            st.dataframe(schema_df)
+            
+            # Get sample data
+            sample_query = f"SELECT * FROM {table} LIMIT 5"
+            sample_df = execute_query(sample_query)
+            st.subheader("Sample Data")
+            st.dataframe(sample_df)
+            
+            # Store table info for AI assistant
+            table_info[table] = {
+                "schema": schema_df.to_dict(orient="records"),
+                "sample": sample_df.head().to_dict(orient="records")
+            }
+    
+    # Input area for AI queries
+    st.header("Query Your Data with AI")
+    
+    # Create a text area for the query
+    user_query = st.text_area(
+        "Ask a question about your data in natural language:", 
+        height=150,
+        placeholder="Example: Show me the top 5 products by revenue, Which customers have spent the most in the last quarter, etc."
+    )
+    
+    # Execute query button
+    if st.button("Generate and Run Query"):
+        if user_query:
+            st.info("In a production environment, this would process your query using AI and generate SQL.")
+            
+            # This is a placeholder for the AI functionality
+            # In a real implementation, this would call an LLM API to generate SQL
+            st.subheader("Generated SQL Query")
+            st.code(f"SELECT * FROM {silver_tables[0]} LIMIT 10;", language="sql")
+            
+            # Execute a simple query for demonstration
+            result_df = execute_query(f"SELECT * FROM {silver_tables[0]} LIMIT 10")
+            
+            st.subheader("Query Results")
+            st.dataframe(result_df)
+            
+            # Option to refine the query
+            st.subheader("Refine Your Query")
+            refined_query = st.text_area("Edit the SQL query if needed:", 
+                                        value=f"SELECT * FROM {silver_tables[0]} LIMIT 10;",
+                                        height=100)
+            
+            if st.button("Run Refined Query"):
+                try:
+                    refined_result = execute_query(refined_query)
+                    st.subheader("Refined Query Results")
+                    st.dataframe(refined_result)
+                except Exception as e:
+                    st.error(f"Error executing query: {e}")
+        else:
+            st.warning("Please enter a query first.")
+
+    # Provide some example queries for users
+    with st.expander("Example Queries"):
+        st.markdown("""
+        Here are some example queries you can try:
+        
+        - Show me the total sales by product category
+        - Which customers made the most purchases last month?
+        - What's the average transaction value by day of week?
+        - Show me trends in customer acquisition over time
+        - Identify products frequently purchased together
+        """)
 
 # -----------------------------
 # Progress Indicator
@@ -440,13 +598,15 @@ def display_progress():
     steps = [
         {"name": "Data Extraction", "complete": st.session_state.extraction_complete},
         {"name": "Data Mapping", "complete": st.session_state.mapping_complete},
-        {"name": "Data Transformations", "complete": False}  # Always false as it's the final step
+        {"name": "Data Transformations", "complete": st.session_state.transformation_complete},
+        {"name": "Query Data AI", "complete": False}  # Always false as it's the final step
     ]
     
-    col1, col2, col3 = st.sidebar.columns(3)
+    col1, col2, col3, col4 = st.sidebar.columns(4)
+    cols = [col1, col2, col3, col4]
     
     for i, step in enumerate(steps):
-        col = [col1, col2, col3][i]
+        col = cols[i]
         if step["complete"]:
             col.markdown(f"#### ✅ {step['name']}")
         else:
@@ -456,33 +616,40 @@ def display_progress():
 # Main App
 # -----------------------------
 def main():
-    st.sidebar.title("ETL Pipeline")
-    st.sidebar.subheader("Progress")
-    display_progress()
-    
-    st.sidebar.subheader("Navigation")
-    
-    # Determine which pages are accessible
-    pages = {
-        "1. Data Extraction": data_extraction_page,
-        "2. Data Mapping": data_mapping_page if st.session_state.extraction_complete else None,
-        "3. Data Transformations": data_transformations_page if st.session_state.mapping_complete else None
-    }
-    
-    # Filter out None values for disabled pages
-    available_pages = {k: v for k, v in pages.items() if v is not None}
-    
-    # Create the radio buttons for navigation
-    page = st.sidebar.radio("Select Step", list(available_pages.keys()))
-    
-    # Run the selected page function
-    available_pages[page]()
-    
-    # Add explanation for disabled pages
-    if "2. Data Mapping" not in available_pages:
-        st.sidebar.info("Complete Data Extraction to unlock Data Mapping")
-    if "3. Data Transformations" not in available_pages:
-        st.sidebar.info("Complete Data Mapping to unlock Data Transformations")
+    # Check if we should only show the query page
+    if st.session_state.show_only_query:
+        query_data_ai_page()
+    else:
+        st.sidebar.title("ETL Pipeline")
+        st.sidebar.subheader("Progress")
+        display_progress()
+        
+        st.sidebar.subheader("Navigation")
+        
+        # Determine which pages are accessible
+        pages = {
+            "1. Data Extraction": data_extraction_page,
+            "2. Data Mapping": data_mapping_page if st.session_state.extraction_complete else None,
+            "3. Data Transformations": data_transformations_page if st.session_state.mapping_complete else None,
+            "4. Query Data using AI": query_data_ai_page if st.session_state.transformation_complete else None
+        }
+        
+        # Filter out None values for disabled pages
+        available_pages = {k: v for k, v in pages.items() if v is not None}
+        
+        # Create the radio buttons for navigation
+        page = st.sidebar.radio("Select Step", list(available_pages.keys()))
+        
+        # Run the selected page function
+        available_pages[page]()
+        
+        # Add explanation for disabled pages
+        if "2. Data Mapping" not in available_pages:
+            st.sidebar.info("Complete Data Extraction to unlock Data Mapping")
+        if "3. Data Transformations" not in available_pages:
+            st.sidebar.info("Complete Data Mapping to unlock Data Transformations")
+        if "4. Query Data using AI" not in available_pages:
+            st.sidebar.info("Complete Data Transformations to unlock Query Data using AI")
 
 if __name__ == "__main__":
     main()

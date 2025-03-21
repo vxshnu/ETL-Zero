@@ -7,7 +7,9 @@ import pandas as pd
 from sqlalchemy import create_engine
 from datetime import datetime
 import os
-
+import glob
+import time
+    
 # Import functions and classes from modules
 from transformations_code import (
     list_tables_in_raw_db, extract_all_tables, TRANSFORMATIONS,
@@ -17,6 +19,8 @@ from mapping import DatasetMapper  # from mapping.py
 from data_extraction import total_refresh, incremental_load, connect_to_raw_db
 
 # Initialize session state for tracking progress
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = "Text to SQL"  # Set a default page
 if 'extraction_complete' not in st.session_state:
     st.session_state.extraction_complete = False
 if 'mapping_complete' not in st.session_state:
@@ -29,6 +33,9 @@ if 'tables' not in st.session_state:
     st.session_state.tables = []
 if 'show_only_query' not in st.session_state:
     st.session_state.show_only_query = False
+if 'query_page' not in st.session_state:
+    st.session_state.query_page = "Text to SQL"
+
 
 # Check if files exist to determine completion status
 if os.path.exists('extraction.json'):
@@ -216,6 +223,28 @@ def execute_query(query):
             conn.close()
             return pd.DataFrame({"Error": [str(e)]})
     return pd.DataFrame({"Error": ["Could not connect to silver_db"]})
+
+# -----------------------------
+# Delete ETL Pipeline Function
+# -----------------------------
+def delete_etl_pipeline():
+    json_files = glob.glob("*.json")
+    if not json_files:
+        return "No ETL files found to delete."
+    
+    try:
+        for file in json_files:
+            os.remove(file)
+        
+        # Reset session state
+        st.session_state.extraction_complete = False
+        st.session_state.mapping_complete = False
+        st.session_state.transformation_complete = False
+        st.session_state.show_only_query = False
+        
+        return f"Successfully deleted {len(json_files)} ETL pipeline files."
+    except Exception as e:
+        return f"Error deleting ETL pipeline: {e}"
 
 # -----------------------------
 # Page Functions
@@ -503,10 +532,11 @@ def data_transformations_page():
                 st.session_state.show_only_query = True
                 st.rerun()  # Refresh the page to show only query page
 
-def query_data_ai_page():
-    st.title("Query Data using AI")
-    
-    st.header("Silver DB Tables Information")
+# -----------------------------
+# Data Exploration Pages
+# -----------------------------
+def text_to_sql_page():
+    st.title("Text to SQL")
     
     # Get all tables from silver_db
     silver_tables = list_tables_in_silver_db()
@@ -517,18 +547,19 @@ def query_data_ai_page():
     
     # Display table information
     table_info = {}
-    for table in silver_tables:
-        with st.expander(f"Table: {table}"):
+    with st.expander("Table Information", expanded=False):
+        for table in silver_tables:
+            st.subheader(f"Table: {table}")
             # Get schema
             schema = get_table_schema(table)
             schema_df = pd.DataFrame(schema, columns=["Field", "Type", "Null", "Key", "Default", "Extra"])
-            st.subheader("Schema")
+            st.write("Schema:")
             st.dataframe(schema_df)
             
             # Get sample data
             sample_query = f"SELECT * FROM {table} LIMIT 5"
             sample_df = execute_query(sample_query)
-            st.subheader("Sample Data")
+            st.write("Sample Data:")
             st.dataframe(sample_df)
             
             # Store table info for AI assistant
@@ -538,47 +569,148 @@ def query_data_ai_page():
             }
     
     # Input area for AI queries
-    st.header("Query Your Data with AI")
+    st.header("Query Your Data with Natural Language")
     
     # Create a text area for the query
     user_query = st.text_area(
-        "Ask a question about your data in natural language:", 
-        height=150,
+        "Ask a question about your data:", 
+        height=100,
         placeholder="Example: Show me the top 5 products by revenue, Which customers have spent the most in the last quarter, etc."
     )
     
-    # Execute query button
-    if st.button("Generate and Run Query"):
+    # Initialize session state for storing generated SQL and results
+    if 'generated_sql' not in st.session_state:
+        st.session_state.generated_sql = ""
+    if 'sql_results' not in st.session_state:
+        st.session_state.sql_results = None
+    if 'golden_db_saved' not in st.session_state:
+        st.session_state.golden_db_saved = False
+    if 'show_success' not in st.session_state:
+        st.session_state.show_success = False
+    
+    # Generate SQL button
+    if st.button("Generate SQL Query"):
         if user_query:
-            st.info("In a production environment, this would process your query using AI and generate SQL.")
-            
-            # This is a placeholder for the AI functionality
-            # In a real implementation, this would call an LLM API to generate SQL
-            st.subheader("Generated SQL Query")
-            st.code(f"SELECT * FROM {silver_tables[0]} LIMIT 10;", language="sql")
-            
-            # Execute a simple query for demonstration
-            result_df = execute_query(f"SELECT * FROM {silver_tables[0]} LIMIT 10")
-            
-            st.subheader("Query Results")
-            st.dataframe(result_df)
-            
-            # Option to refine the query
-            st.subheader("Refine Your Query")
-            refined_query = st.text_area("Edit the SQL query if needed:", 
-                                        value=f"SELECT * FROM {silver_tables[0]} LIMIT 10;",
-                                        height=100)
-            
-            if st.button("Run Refined Query"):
+            with st.spinner("Generating SQL query..."):
+                # Import the process_query function from text_to_sql.py
+                from text_to_sql import process_query
+                
+                # Generate SQL using the model
+                st.session_state.generated_sql = process_query(user_query)
+                st.session_state.sql_results = None  # Reset results when generating new SQL
+                st.session_state.show_success = True
+    
+    # Show success message for generation
+    if st.session_state.show_success and st.session_state.generated_sql:
+        st.success("✅ SQL query successfully generated!")
+        st.session_state.show_success = False  # Reset so it only shows once
+    
+    # Display and allow editing of the generated SQL
+    if st.session_state.generated_sql:
+        st.subheader("Generated SQL Query")
+        
+        # Allow editing the generated SQL
+        edited_sql = st.text_area(
+            "Edit SQL if needed:", 
+            value=st.session_state.generated_sql,
+            height=100
+        )
+        
+        # Run SQL button (separate from generation)
+        if st.button("Run SQL Query"):
+            with st.spinner("Executing query..."):
                 try:
-                    refined_result = execute_query(refined_query)
-                    st.subheader("Refined Query Results")
-                    st.dataframe(refined_result)
+                    result_df = execute_query(edited_sql)
+                    st.session_state.sql_results = result_df
+                    st.session_state.current_sql = edited_sql
                 except Exception as e:
                     st.error(f"Error executing query: {e}")
-        else:
-            st.warning("Please enter a query first.")
-
+    
+    # Display results if available
+    if st.session_state.sql_results is not None:
+        st.subheader("Query Results")
+        st.dataframe(st.session_state.sql_results)
+        
+        # Option to save to golden_db (only if we have results)
+        if not st.session_state.sql_results.empty:
+            st.subheader("Save to Golden Database")
+            
+            # Use columns for layout
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                save_to_golden = st.checkbox("Save to golden_db")
+            
+            with col2:
+                if save_to_golden:
+                    # Get existing golden_db tables for reference
+                    try:
+                        conn = mysql.connector.connect(
+                            host="localhost",
+                            user="root",
+                            password="root",
+                            database="golden_db"
+                        )
+                        cursor = conn.cursor()
+                        cursor.execute("SHOW TABLES")
+                        existing_tables = [table[0] for table in cursor.fetchall()]
+                        cursor.close()
+                        conn.close()
+                    except:
+                        existing_tables = []
+                    
+                    # Show existing tables if there are any
+                    if existing_tables:
+                        st.write("Existing tables in golden_db:")
+                        st.write(", ".join(existing_tables))
+                    
+                    # More descriptive table name with default value
+                    default_name = f"golden_{datetime.now().strftime('%Y%m%d_%H%M')}"
+                    table_name = st.text_input(
+                        "Enter a meaningful name for this table:", 
+                        value=default_name,
+                        help="Choose a descriptive name for your results table"
+                    )
+            
+            # Save button with form to prevent page refresh
+            if save_to_golden:
+                # Use a form to prevent page refresh
+                with st.form(key="save_to_golden_form"):
+                    st.write("Click to confirm saving data to golden_db")
+                    submit_button = st.form_submit_button(label="Save to Golden DB")
+                    
+                    if submit_button:
+                        try:
+                            # Connect to MySQL without database to create if needed
+                            conn = mysql.connector.connect(
+                                host="localhost",
+                                user="root",
+                                password="root"
+                            )
+                            cursor = conn.cursor()
+                            cursor.execute("CREATE DATABASE IF NOT EXISTS golden_db")
+                            cursor.close()
+                            conn.close()
+                            
+                            # Now connect to the golden_db and save the data
+                            engine = create_engine(f"mysql+mysqlconnector://root:root@localhost/golden_db")
+                            st.session_state.sql_results.to_sql(table_name, con=engine, if_exists='replace', index=False)
+                            
+                            st.session_state.golden_db_saved = True
+                            # Store the table name that was used
+                            st.session_state.saved_table_name = table_name
+                            return True
+                        except Exception as e:
+                            st.error(f"Error saving to golden_db: {e}")
+                            return False
+                
+                # Show success message outside the form if data was saved
+                if st.session_state.golden_db_saved:
+                    st.success(f"✅ Data successfully saved to golden_db.{st.session_state.saved_table_name}")
+                    st.info("You can now visualize this data in the Data Visualization tab.")
+                    # Reset the flag after showing the message
+                    st.session_state.golden_db_saved = False
+    
     # Provide some example queries for users
     with st.expander("Example Queries"):
         st.markdown("""
@@ -590,66 +722,245 @@ def query_data_ai_page():
         - Show me trends in customer acquisition over time
         - Identify products frequently purchased together
         """)
-
-# -----------------------------
-# Progress Indicator
-# -----------------------------
-def display_progress():
-    steps = [
-        {"name": "Data Extraction", "complete": st.session_state.extraction_complete},
-        {"name": "Data Mapping", "complete": st.session_state.mapping_complete},
-        {"name": "Data Transformations", "complete": st.session_state.transformation_complete},
-        {"name": "Query Data AI", "complete": False}  # Always false as it's the final step
-    ]
+        
+def data_visualization_page():
+    st.title("Data Visualization")
     
-    col1, col2, col3, col4 = st.sidebar.columns(4)
-    cols = [col1, col2, col3, col4]
+    # Get all tables from golden_db
+    try:
+        # Connect to golden_db instead of silver_db
+        conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="root",
+            database="golden_db"
+        )
+        cursor = conn.cursor()
+        cursor.execute("SHOW TABLES")
+        golden_tables = [table[0] for table in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        st.error(f"Error connecting to golden_db: {e}")
+        golden_tables = []
     
-    for i, step in enumerate(steps):
-        col = cols[i]
-        if step["complete"]:
-            col.markdown(f"#### ✅ {step['name']}")
-        else:
-            col.markdown(f"#### ⏳ {step['name']}")
+    if not golden_tables:
+        st.warning("No tables found in golden_db. Please ensure data was loaded properly from your queries.")
+        return
+    
+    # Table selection
+    selected_table = st.selectbox("Select a table to visualize", golden_tables)
+    
+    # Get the data
+    if selected_table:
+        try:
+            # Execute query on golden_db
+            conn = mysql.connector.connect(
+                host="localhost",
+                user="root",
+                password="root",
+                database="golden_db"
+            )
+            df = pd.read_sql(f"SELECT * FROM {selected_table}", conn)
+            conn.close()
+            
+            st.write(f"Data preview for {selected_table}:")
+            st.dataframe(df.head())
+            
+            # Only show visualization options if we have data
+            if not df.empty:
+                st.header("Create Visualization")
+                
+                # Select chart type
+                chart_type = st.selectbox(
+                    "Select chart type",
+                    ["Bar Chart", "Line Chart", "Scatter Plot", "Histogram", "Pie Chart"]
+                )
+                
+                # Get column names for x and y axis selection
+                numeric_columns = df.select_dtypes(include=['int', 'float']).columns.tolist()
+                all_columns = df.columns.tolist()
+                
+                if chart_type in ["Bar Chart", "Line Chart", "Scatter Plot"]:
+                    x_axis = st.selectbox("Select X-axis", all_columns)
+                    y_axis = st.selectbox("Select Y-axis", numeric_columns)
+                    
+                    if st.button("Generate Chart"):
+                        st.subheader(f"{chart_type}: {y_axis} by {x_axis}")
+                        
+                        if chart_type == "Bar Chart":
+                            st.bar_chart(df.set_index(x_axis)[y_axis])
+                        elif chart_type == "Line Chart":
+                            st.line_chart(df.set_index(x_axis)[y_axis])
+                        elif chart_type == "Scatter Plot":
+                            st.scatter_chart(df.set_index(x_axis)[y_axis])
+                
+                elif chart_type == "Histogram":
+                    column = st.selectbox("Select column for histogram", numeric_columns)
+                    bins = st.slider("Number of bins", min_value=5, max_value=100, value=20)
+                    
+                    if st.button("Generate Histogram"):
+                        st.subheader(f"Histogram of {column}")
+                        hist_values = df[column].dropna()
+                        if not hist_values.empty:
+                            st.bar_chart(hist_values.value_counts(bins=bins).sort_index())
+                        else:
+                            st.error("No valid data for histogram.")
+                
+                elif chart_type == "Pie Chart":
+                    st.info("For pie charts, the data will be aggregated by the selected category column")
+                    category_column = st.selectbox("Select category column", all_columns)
+                    value_column = st.selectbox("Select value column", numeric_columns)
+                    
+                    if st.button("Generate Pie Chart"):
+                        st.subheader(f"Pie Chart: {value_column} by {category_column}")
+                        # This is a placeholder as Streamlit doesn't have native pie chart
+                        pie_data = df.groupby(category_column)[value_column].sum()
+                        st.write("Pie Chart Data:")
+                        st.dataframe(pie_data)
+                        st.info("Note: Streamlit doesn't have a native pie chart. In a production app, you would use Plotly or other libraries.")
+        
+        except Exception as e:
+            st.error(f"Error loading data: {e}")
 
 # -----------------------------
-# Main App
+# Delete ETL Pipeline Function
 # -----------------------------
-def main():
-    # Check if we should only show the query page
-    if st.session_state.show_only_query:
-        query_data_ai_page()
-    else:
-        st.sidebar.title("ETL Pipeline")
-        st.sidebar.subheader("Progress")
-        display_progress()
+def delete_etl_pipeline():
+    # First delete JSON files
+    json_files = glob.glob("*.json")
+    files_deleted = 0
+    
+    try:
+        for file in json_files:
+            os.remove(file)
+            files_deleted += 1
         
-        st.sidebar.subheader("Navigation")
+        # Now drop and recreate databases
+        try:
+            # Connect to MySQL without specifying a database
+            conn = mysql.connector.connect(
+                host="localhost",
+                user="root",
+                password="root"
+            )
+            cursor = conn.cursor()
+            
+            # Drop databases if they exist
+            cursor.execute("DROP DATABASE IF EXISTS raw_db")
+            cursor.execute("DROP DATABASE IF EXISTS silver_db_mapping")
+            cursor.execute("DROP DATABASE IF EXISTS silver_db")
+            cursor.execute("DROP DATABASE IF EXISTS golden_db")
+            
+            # Recreate empty databases
+            cursor.execute("CREATE DATABASE raw_db")
+            cursor.execute("CREATE DATABASE silver_db_mapping")
+            cursor.execute("CREATE DATABASE silver_db")
+            cursor.execute("CREATE DATABASE golden_db")
+            
+            cursor.close()
+            conn.close()
+            
+            # Reset session state
+            st.session_state.extraction_complete = False
+            st.session_state.mapping_complete = False
+            st.session_state.transformation_complete = False
+            st.session_state.show_only_query = False
+            
+            return f"Successfully deleted {files_deleted} ETL pipeline files and reset all databases."
         
-        # Determine which pages are accessible
-        pages = {
-            "1. Data Extraction": data_extraction_page,
-            "2. Data Mapping": data_mapping_page if st.session_state.extraction_complete else None,
-            "3. Data Transformations": data_transformations_page if st.session_state.mapping_complete else None,
-            "4. Query Data using AI": query_data_ai_page if st.session_state.transformation_complete else None
-        }
-        
-        # Filter out None values for disabled pages
-        available_pages = {k: v for k, v in pages.items() if v is not None}
-        
-        # Create the radio buttons for navigation
-        page = st.sidebar.radio("Select Step", list(available_pages.keys()))
-        
-        # Run the selected page function
-        available_pages[page]()
-        
-        # Add explanation for disabled pages
-        if "2. Data Mapping" not in available_pages:
-            st.sidebar.info("Complete Data Extraction to unlock Data Mapping")
-        if "3. Data Transformations" not in available_pages:
-            st.sidebar.info("Complete Data Mapping to unlock Data Transformations")
-        if "4. Query Data using AI" not in available_pages:
-            st.sidebar.info("Complete Data Transformations to unlock Query Data using AI")
+        except mysql.connector.Error as err:
+            return f"Files deleted but database reset failed: {err}"
+            
+    except Exception as e:
+        return f"Error deleting ETL pipeline: {e}"
 
-if __name__ == "__main__":
-    main()
+def logging_page():
+    st.title("ETL Pipeline Logs")
+    
+    # Check if any log files exist
+    log_files = []
+    if os.path.exists('extraction.json'):
+        log_files.append('extraction.json')
+    if os.path.exists('mapping_status.json'):
+        log_files.append('mapping_status.json')
+    if os.path.exists('transformation_status.json'):
+        log_files.append('transformation_status.json')
+    if os.path.exists('selected_transformations.json'):
+        log_files.append('selected_transformations.json')
+    if os.path.exists('selected_aggregation_parameters.json'):
+        log_files.append('selected_aggregation_parameters.json')
+    
+    # Add any table-specific aggregation logs
+    table_agg_logs = glob.glob("*_agg.json")
+    log_files.extend(table_agg_logs)
+    
+    if not log_files:
+        st.warning("No log files found. The ETL pipeline hasn't been run yet.")
+        return
+    # Main app navigation
+# Main app navigation
+if st.session_state.transformation_complete:
+    # Add top navigation menu instead of sidebar
+    st.title("Data Analytics Platform")
+    
+    # Create a horizontal navigation bar using columns
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        if st.button("Text to SQL", use_container_width=True):
+            st.session_state.current_page = "Text to SQL"
+    
+    with col2:
+        if st.button("Data Visualization", use_container_width=True):
+            st.session_state.current_page = "Data Visualization"
+    
+    with col3:
+        if st.button("Logs", use_container_width=True):
+            st.session_state.current_page = "Logs"
+    
+    with col4:
+        if st.button("Reset ETL", use_container_width=True):
+            st.session_state.current_page = "Reset"
+    
+    st.divider()  # Add a divider below the navigation
+    
+    # Display the selected page
+    if st.session_state.current_page == "Text to SQL":
+        text_to_sql_page()
+    elif st.session_state.current_page == "Data Visualization":
+        data_visualization_page()
+    elif st.session_state.current_page == "Logs":
+        logging_page()
+    elif st.session_state.current_page == "Reset":
+        st.header("Reset ETL Pipeline")
+        st.warning("⚠️ Warning: This will delete all ETL pipeline files and reset all databases. This action cannot be undone.")
+        
+        # Add confirmation checkbox
+        confirm_delete = st.checkbox("I understand that this will reset the entire ETL pipeline and all databases")
+        
+        # Single button that's disabled until checkbox is checked
+        if st.button("Delete ETL Pipeline Files & Reset Databases", disabled=not confirm_delete):
+            result = delete_etl_pipeline()
+            st.success(result)
+            st.info("Redirecting to ETL Pipeline setup...")
+            # Add a slight delay for user to see the message
+            import time
+            time.sleep(2)
+            st.rerun()
+else:
+    # Create tabs only for the ETL pipeline stages
+    tab1, tab2, tab3 = st.tabs([
+        "Data Extraction", 
+        "Data Mapping", 
+        "Data Transformations"
+    ])
+    
+    with tab1:
+        data_extraction_page()
+    
+    with tab2:
+        data_mapping_page()
+    
+    with tab3:
+        data_transformations_page()

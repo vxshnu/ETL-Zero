@@ -1,11 +1,13 @@
+# scheduler.py
 import json
 import time
 import schedule
 import os
 import logging
+import sys
+import pandas as pd
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine
-import sys
 
 # Import functions from your modules
 from data_extraction import schedule_etl_job, connect_to_raw_db
@@ -30,8 +32,13 @@ def run_extraction():
     """
     logging.info("Starting scheduled extraction process")
     try:
-        if os.path.exists('extraction.json'):
-            result = schedule_etl_job('extraction.json')
+        # Use absolute path for more reliable file detection
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        extraction_path = os.path.join(current_dir, 'extraction.json')
+        
+        logging.info(f"Looking for extraction config at: {extraction_path}")
+        if os.path.exists(extraction_path):
+            result = schedule_etl_job(extraction_path)
             logging.info(f"Extraction completed: {result}")
             return True
         else:
@@ -47,8 +54,12 @@ def run_mapping():
     """
     logging.info("Starting scheduled mapping process")
     try:
-        if os.path.exists('mapping_status.json'):
-            with open('mapping_status.json', 'r') as f:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        mapping_path = os.path.join(current_dir, 'mapping_status.json')
+        
+        logging.info(f"Looking for mapping config at: {mapping_path}")
+        if os.path.exists(mapping_path):
+            with open(mapping_path, 'r') as f:
                 mapping_config = json.load(f)
             
             if mapping_config.get("mapping", True):
@@ -105,8 +116,12 @@ def run_transformation():
     """
     logging.info("Starting scheduled transformation process")
     try:
-        if os.path.exists('selected_transformations.json'):
-            with open('selected_transformations.json', 'r') as f:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        transform_path = os.path.join(current_dir, 'selected_transformations.json')
+        
+        logging.info(f"Looking for transformation config at: {transform_path}")
+        if os.path.exists(transform_path):
+            with open(transform_path, 'r') as f:
                 transform_config = json.load(f)
             
             selected_transforms = transform_config.get("selected_transformations", [])
@@ -125,8 +140,9 @@ def run_transformation():
             logging.info("Transformed data loaded to silver_db")
             
             # Check for aggregations
-            if os.path.exists('selected_aggregation_parameters.json'):
-                with open('selected_aggregation_parameters.json', 'r') as f:
+            agg_path = os.path.join(current_dir, 'selected_aggregation_parameters.json')
+            if os.path.exists(agg_path):
+                with open(agg_path, 'r') as f:
                     agg_params = json.load(f)
                 
                 # Process each table's aggregation
@@ -155,7 +171,7 @@ def run_transformation():
                     logging.info("Aggregated data loaded to silver_db")
             
             # Mark transformation as complete
-            with open("transformation_status.json", "w") as f:
+            with open(os.path.join(current_dir, "transformation_status.json"), "w") as f:
                 json.dump({"transformation_complete": True}, f)
             
             return True
@@ -196,11 +212,15 @@ def setup_schedule():
     """
     Set up the schedule based on extraction.json config
     """
-    if not os.path.exists('extraction.json'):
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    extraction_path = os.path.join(current_dir, 'extraction.json')
+    
+    logging.info(f"Looking for extraction config for scheduling at: {extraction_path}")
+    if not os.path.exists(extraction_path):
         logging.error("extraction.json not found, cannot set up schedule")
         return
     
-    with open('extraction.json', 'r') as f:
+    with open(extraction_path, 'r') as f:
         config = json.load(f)
     
     frequency = config.get('frequency', None)
@@ -248,15 +268,38 @@ def setup_schedule():
     else:
         logging.error(f"Unsupported frequency: {frequency}")
 
+def check_config_files():
+    """
+    Debug function to check the existence of config files
+    """
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    files_to_check = [
+        'extraction.json', 
+        'mapping_status.json', 
+        'selected_transformations.json', 
+        'transformation_status.json'
+    ]
+    
+    logging.info(f"Current working directory: {os.getcwd()}")
+    logging.info(f"Script directory: {current_dir}")
+    
+    found_files = []
+    for file_name in files_to_check:
+        file_path = os.path.join(current_dir, file_name)
+        exists = os.path.exists(file_path)
+        logging.info(f"Looking for {file_path}: {'FOUND' if exists else 'NOT FOUND'}")
+        if exists:
+            found_files.append(file_name)
+    
+    return len(found_files) > 0
+
 if __name__ == "__main__":
-    import pandas as pd
     logging.info("ETL Scheduler started")
     
-    # Check if any configuration files exist
-    if (os.path.exists('extraction.json') or 
-        os.path.exists('mapping_status.json') or 
-        os.path.exists('selected_transformations.json')):
-        
+    # Debug file existence
+    files_exist = check_config_files()
+    
+    if files_exist:
         # Check if it's a scheduled run or an immediate run
         if len(sys.argv) > 1 and sys.argv[1] == "--now":
             logging.info("Running ETL pipeline immediately")

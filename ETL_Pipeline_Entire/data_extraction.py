@@ -82,13 +82,17 @@ def incremental_load(src_engine, raw_db_engine, table_name):
                 else:
                     return f"⚠ Table '{table_name}' created but no data to load.", None, datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
-            # If table exists, get last recorded ID
-            last_id_result = raw_db_conn.execute(text(f"SELECT MAX(id) FROM {table_name}"))
-            last_id = last_id_result.fetchone()[0]
-            last_id = last_id if last_id is not None else 0  # Default to 0 if no data
+            # Get the first column name from the table
+            columns_query = f"SHOW COLUMNS FROM {table_name}"
+            first_column = raw_db_conn.execute(text(columns_query)).fetchone()[0]  # First column name
+            
+            # If table exists, get last recorded value of the first column
+            last_val_result = raw_db_conn.execute(text(f"SELECT MAX({first_column}) FROM {table_name}"))
+            last_val = last_val_result.fetchone()[0]
+            last_val = last_val if last_val is not None else 0  # Default to 0 if no data
             
             # Fetch only new records
-            query = f"SELECT * FROM {table_name} WHERE id > {last_id}"
+            query = f"SELECT * FROM {table_name} WHERE {first_column} > '{last_val}'"
             src_df = pd.read_sql(query, src_conn)
             
             if src_df.empty:
